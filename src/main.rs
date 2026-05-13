@@ -63,6 +63,12 @@ async fn fake_main() {
     let result = timer_future.await;
 
     println!("timer_future returned: {}", result);
+
+    let timer_future = TimerFuture::new(Duration::from_secs(2));
+
+    let result = timer_future.await;
+
+    println!("timer_future returned: {}", result);
 }
 
 fn main() {
@@ -109,6 +115,7 @@ fn run<T>(mut future: impl Future<Output = T>) -> T {
     let mut cx = Context::from_waker(&waker);
 
     loop {
+        println!("polling");
         match Future::poll(pinned_future.as_mut(), &mut cx) {
             Poll::Pending => {
                 let mut bool = arc_park.0.lock().unwrap();
@@ -116,6 +123,8 @@ fn run<T>(mut future: impl Future<Output = T>) -> T {
                 while !*bool {
                     bool = arc_park.1.wait(bool).unwrap();
                 }
+
+                *bool = false;
             }
             Poll::Ready(val) => return val,
         }
