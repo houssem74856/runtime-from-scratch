@@ -4,7 +4,7 @@ use std::{
     mem,
     pin::Pin,
     sync::{
-        Arc, Barrier, Mutex, OnceLock,
+        Arc, Barrier, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
@@ -84,7 +84,7 @@ thread_local! {
     static THREAD_ID: Cell<Option<usize>> = Cell::new(None);
 }
 
-static DEQUES: Mutex<Vec<VecDeque<Arc<dyn TaskTrait>>>> = Mutex::new(Vec::new());
+static DEQUES: RwLock<Vec<Mutex<VecDeque<Arc<dyn TaskTrait>>>>> = RwLock::new(Vec::new());
 static THREADS: OnceLock<Vec<Thread>> = OnceLock::new();
 
 static BARRIER: OnceLock<Barrier> = OnceLock::new();
@@ -112,9 +112,9 @@ fn on_task_complete() {
 
 fn main_for_workers() {
     let thread_id = {
-        let mut deques = DEQUES.lock().unwrap();
+        let mut deques = DEQUES.write().unwrap();
         let id = deques.len();
-        deques.push(VecDeque::new());
+        deques.push(Mutex::new(VecDeque::new()));
         id
     };
     THREAD_ID.with(|id| id.set(Some(thread_id)));
@@ -157,8 +157,10 @@ const VTABLE: RawWakerVTable = RawWakerVTable::new(
     },
     |wake_me| unsafe {
         let arc = Arc::from_raw(wake_me as *const Arc<dyn TaskTrait>);
-        let _ =
-            DEQUES.lock().unwrap()[Arc::clone(&*arc).get_thread_id()].push_back(Arc::clone(&*arc));
+        let _ = DEQUES.read().unwrap()[Arc::clone(&*arc).get_thread_id()]
+            .lock()
+            .unwrap()
+            .push_back(Arc::clone(&*arc));
         if let Some(threads) = THREADS.get() {
             for thread in threads {
                 thread.unpark();
@@ -167,8 +169,10 @@ const VTABLE: RawWakerVTable = RawWakerVTable::new(
     },
     |wake_by_ref_me| unsafe {
         let arc = Arc::from_raw(wake_by_ref_me as *const Arc<dyn TaskTrait>);
-        let _ =
-            DEQUES.lock().unwrap()[Arc::clone(&*arc).get_thread_id()].push_back(Arc::clone(&*arc));
+        let _ = DEQUES.read().unwrap()[Arc::clone(&*arc).get_thread_id()]
+            .lock()
+            .unwrap()
+            .push_back(Arc::clone(&*arc));
         if let Some(threads) = THREADS.get() {
             for thread in threads {
                 thread.unpark();
@@ -277,7 +281,10 @@ fn spawn<T: Send + Sync + 'static>(
     *ACTIVE_TASKS.lock().unwrap() += 1;
 
     let id = THREAD_ID.with(|id| id.get().unwrap());
-    DEQUES.lock().unwrap()[id].push_back(Arc::new(task));
+    DEQUES.read().unwrap()[id]
+        .lock()
+        .unwrap()
+        .push_back(Arc::new(task));
 
     if let Some(threads) = THREADS.get() {
         for thread in threads {
@@ -296,7 +303,7 @@ fn run() {
             break;
         }
 
-        let task = { DEQUES.lock().unwrap()[id].pop_front() };
+        let task = { DEQUES.read().unwrap()[id].lock().unwrap().pop_front() };
         if let Some(task) = task {
             println!("executor: thread {} working on own task", id);
             let raw_waker = RawWaker::new(
@@ -314,7 +321,12 @@ fn run() {
 
             for i in 1..THREAD_COUNT {
                 let thread_id_we_gone_steal_from = (id + i) % THREAD_COUNT;
-                let task = { DEQUES.lock().unwrap()[thread_id_we_gone_steal_from].pop_back() };
+                let task = {
+                    DEQUES.read().unwrap()[thread_id_we_gone_steal_from]
+                        .lock()
+                        .unwrap()
+                        .pop_back()
+                };
                 if let Some(task) = task {
                     found_work = true;
 
